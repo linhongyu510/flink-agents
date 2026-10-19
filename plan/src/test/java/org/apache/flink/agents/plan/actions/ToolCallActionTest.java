@@ -41,6 +41,7 @@ import org.apache.flink.agents.api.tools.ToolType;
 import org.apache.flink.agents.plan.AgentConfiguration;
 import org.apache.flink.agents.plan.JavaFunction;
 import org.apache.flink.agents.plan.tools.FunctionTool;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -51,8 +52,14 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class ToolCallActionTest {
+
+    @AfterEach
+    void clearInterruptStatus() {
+        Thread.interrupted();
+    }
 
     public static String queryOrder(
             @ToolParam(name = "orderId") String orderId,
@@ -428,7 +435,7 @@ public class ToolCallActionTest {
     }
 
     @Test
-    void processToolRequestUsesFallbackWhenMissingToolErrorHasNoMessage() {
+    void processToolRequestUsesFallbackWhenMissingToolErrorHasNoMessage() throws Exception {
         FakeRunnerContext ctx =
                 new FakeRunnerContext() {
                     @Override
@@ -558,6 +565,95 @@ public class ToolCallActionTest {
         assertThat(response.getSuccess()).containsEntry("call-2", false);
         assertThat(response.getError()).containsEntry("call-1", "persist failed");
         assertThat(response.getError()).containsEntry("call-2", "persist failed");
+    }
+
+    @Test
+    void processToolRequestPropagatesInterruptedSynchronousToolCall() {
+        FakeRunnerContext ctx =
+                new FakeRunnerContext() {
+                    @Override
+                    public <T> T durableExecute(DurableCallable<T> callable) throws Exception {
+                        throw new InterruptedException("cancelled");
+                    }
+                };
+        ctx.withToolCallAsync(false);
+
+        InterruptedException thrown =
+                assertThrows(
+                        InterruptedException.class,
+                        () ->
+                                ToolCallAction.processToolRequest(
+                                        toolRequest("queryOrder"), ctx));
+
+        assertThat(thrown).hasMessage("cancelled");
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        assertThat(ctx.sentEvents).isEmpty();
+    }
+
+    @Test
+    void processToolRequestPropagatesInterruptedAsynchronousToolCall() {
+        FakeRunnerContext ctx =
+                new FakeRunnerContext() {
+                    @Override
+                    public <T> T durableExecuteAsync(DurableCallable<T> callable) throws Exception {
+                        throw new InterruptedException("cancelled");
+                    }
+                };
+
+        InterruptedException thrown =
+                assertThrows(
+                        InterruptedException.class,
+                        () ->
+                                ToolCallAction.processToolRequest(
+                                        toolRequest("queryOrder"), ctx));
+
+        assertThat(thrown).hasMessage("cancelled");
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        assertThat(ctx.sentEvents).isEmpty();
+    }
+
+    @Test
+    void processToolRequestPropagatesInterruptedParallelBatch() {
+        FakeRunnerContext ctx =
+                new FakeRunnerContext() {
+                    @Override
+                    public <T> List<Outcome<T>> durableExecuteAllAsync(
+                            List<DurableCallable<T>> callables) throws Exception {
+                        throw new InterruptedException("cancelled");
+                    }
+                };
+
+        InterruptedException thrown =
+                assertThrows(
+                        InterruptedException.class,
+                        () ->
+                                ToolCallAction.processToolRequest(
+                                        toolRequest("queryOrder", "call-1", "call-2"), ctx));
+
+        assertThat(thrown).hasMessage("cancelled");
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        assertThat(ctx.sentEvents).isEmpty();
+    }
+
+    @Test
+    void processToolRequestPropagatesInterruptedParallelOutcome() {
+        FakeRunnerContext ctx =
+                new FakeRunnerContext()
+                        .withDurableExecuteAllAsyncOutcomes(
+                                List.of(
+                                        Outcome.failure(new InterruptedException("cancelled")),
+                                        Outcome.success(ToolResponse.success("unused"))));
+
+        InterruptedException thrown =
+                assertThrows(
+                        InterruptedException.class,
+                        () ->
+                                ToolCallAction.processToolRequest(
+                                        toolRequest("queryOrder", "call-1", "call-2"), ctx));
+
+        assertThat(thrown).hasMessage("cancelled");
+        assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        assertThat(ctx.sentEvents).isEmpty();
     }
 
     private static ToolRequestEvent toolRequest(String toolName) {

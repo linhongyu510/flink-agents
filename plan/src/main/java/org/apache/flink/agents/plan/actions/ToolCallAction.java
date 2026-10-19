@@ -64,7 +64,7 @@ public class ToolCallAction {
                 List.of(ToolRequestEvent.EVENT_TYPE));
     }
 
-    public static void processToolRequest(Event event, RunnerContext ctx) {
+    public static void processToolRequest(Event event, RunnerContext ctx) throws Exception {
         ToolRequestEvent toolRequest = ToolRequestEvent.fromEvent(event);
         boolean toolCallAsync = ctx.getConfig().get(AgentExecutionOptions.TOOL_CALL_ASYNC);
         int toolCallParallelism = ctx.getConfig().get(AgentExecutionOptions.TOOL_CALL_PARALLELISM);
@@ -196,16 +196,25 @@ public class ToolCallAction {
             RunnerContext ctx,
             Map<String, Boolean> success,
             Map<String, String> error,
-            Map<String, ToolResponse> responses) {
+            Map<String, ToolResponse> responses)
+            throws Exception {
         List<DurableCallable<ToolResponse>> callables = new ArrayList<>(executions.size());
         for (ToolCallExecution execution : executions) {
             callables.add(execution.callable);
         }
         try {
             List<Outcome<ToolResponse>> outcomes = ctx.durableExecuteAllAsync(callables);
+            for (Outcome<ToolResponse> outcome : outcomes) {
+                if (outcome.isFailure() && outcome.getError() instanceof InterruptedException) {
+                    throw outcome.getError();
+                }
+            }
             for (int i = 0; i < outcomes.size(); i++) {
                 recordOutcome(executions.get(i), outcomes.get(i), ctx, success, error, responses);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
         } catch (Exception e) {
             for (ToolCallExecution execution : executions) {
                 recordExecutionException(execution, e, success, error, responses);
@@ -230,7 +239,8 @@ public class ToolCallAction {
             RunnerContext ctx,
             Map<String, Boolean> success,
             Map<String, String> error,
-            Map<String, ToolResponse> responses) {
+            Map<String, ToolResponse> responses)
+            throws Exception {
         for (ToolCallExecution execution : executions) {
             try {
                 ToolResponse response =
@@ -253,6 +263,9 @@ public class ToolCallAction {
                             execution.name,
                             execution.entityMetadata);
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
             } catch (Exception e) {
                 recordExecutionException(execution, e, success, error, responses);
                 ExecutionReporters.failed(
